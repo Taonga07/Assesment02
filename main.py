@@ -1,236 +1,121 @@
+from serial.tools.list_ports import comports as list_ports
+import time, cv2, numpy as np, serial
 
-import time
-import cv2
-import numpy as np
-import serial
-import serial.tools.list_ports as lp
+# Machine Parameters
+BAUDRATE, DEVICE_ID, TARGET_BALLS = 115200, "CH340", 5
+BALL_RADIUS, CAM_OFFSET, LOWER_DEPTH = 120, 50, 30
+BIN_LEFT, BIN_RIGHT = -20, 20
+IS_RIPE = {"Red", "Green", "Orange"}
 
-BAUD, DEVICE_ID = 115200, "CH340"
-TARGET_BALL_COUNT = 5
-COLOR_THRESHOLD = 0.30
-DETECT_RADIUS = 120
-STABLE_FRAMES = 3
-SCAN_DELAY = 0.15
-
-CAM_OFFSET_X, Z_LOWER_DIST = -50, 33
-CUP_OFFSET_LEFT, CUP_OFFSET_RIGHT = -20, 20
-LEFT_COLOURS = ("Red", "Green", "Orange")
-
-COLOURS = {
+COLOUR_RANGES = {
     "Green":  ([36, 60, 50], [85, 255, 255]),
     "Blue":   ([95, 60, 50], [130, 255, 255]),
     "Yellow": ([20, 70, 70], [35, 255, 255]),
     "Orange": ([7, 80, 60], [19, 255, 255]),
-    "Red":    ([0, 70, 50], [6, 255, 255]),
+    "Red":    ([0, 70, 50],  [6, 255, 255],),
 }
+RED_UPPER_RANGE = ([170, 70, 50], [180, 255, 255])
 
 
-def connect_cnc():
-    port = next(
-        (p.device for p in lp.comports()
-         if DEVICE_ID.lower() in p.description.lower()),
-        None,
-    )
-    if port is None:
-        raise RuntimeError(f"No {DEVICE_ID} device found")
+def get_sort_gcode(bin_offset: float) -> str:
+    """Generates relative move sequence to drop ball in target bin."""
+    return f"G91 X{-CAM_OFFSET}\nG91 Z{-LOWER_DEPTH}\nG91 X{bin_offset}\nG91 Z{LOWER_DEPTH}\nG91 X{-bin_offset + CAM_OFFSET}"
 
-    cnc = serial.Serial(port, BAUD, timeout=0)
-    time.sleep(2)
-    cnc.reset_input_buffer()
+
+def connect_cnc() -> serial.Serial:
+    port = next(filter(lambda p: DEVICE_ID in p.description, list_ports())).device
+    if not port: raise RuntimeError(f"Device '{DEVICE_ID}' not found.")
+    
+    cnc = serial.Serial(port, BAUDRATE, timeout=0)
+    time.sleep(2); cnc.reset_input_buffer()
     return cnc
 
 
-def detect_colour(frame):
-    h, w = frame.shape[:2]
-    centre = (w // 2, h // 2)
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
-    region = np.zeros((h, w), dtype=np.uint8)
-    cv2.circle(region, centre, DETECT_RADIUS, 255, -1)
-    area = cv2.countNonZero(region)
-    scores = {}
-
-    for name, (lower, upper) in COLOURS.items():
-        mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
-
-        if name == "Red":
-            red2 = cv2.inRange(
-                hsv, np.array([170, 70, 50]),
-                np.array([180, 255, 255])
-            )
-            mask = cv2.bitwise_or(mask, red2)
-
-        mask = cv2.bitwise_and(mask, region)
-        scores[name] = cv2.countNonZero(mask) / area
-
-    colour = max(scores, key=scores.get)
-    return (
-        colour if scores[colour] >= COLOR_THRESHOLD else None,
-        centre,
-        scores,
-    )
+def send_gcode(cnc: serial.Serial, gcode: str) -> None:
+    for cmd in filter(None, gcode.split("\n")):
+        print("Sending:", cmd)
+        cnc.write(f"{cmd}\n".encode())
+        cnc.flush()
+        
+        deadline, read_buf = time.monotonic() + 60, b""
+        while time.monotonic() < deadline:
+            if cnc.in_waiting:
+                read_buf += cnc.read(cnc.in_waiting)
+                if b"\n" in read_buf:
+                    line, read_buf = read_buf.split(b"\n", 1)
+                    response = line.decode(errors="replace").strip().lower()
+                    if response == "ok":
+                        break
+                    if response.startswith("error"):
+                        raise RuntimeError(f"CNC Error: {response}")
+            time.sleep(0.002)
 
 
-def show_camera(cam):
-    success, frame = cam.read()
-    if not success:
-        raise RuntimeError("Camera read failed")
+def detect_colour(frame: np.ndarray, detect_mask: np.ndarray) -> str | None:
+    hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask_pixels = cv2.countNonZero(detect_mask)
 
-    colour, centre, scores = detect_colour(frame)
-
-    cv2.circle(
-        frame, centre, DETECT_RADIUS,
-        (0, 255, 0) if colour else (0, 0, 255), 2
-    )
-    cv2.putText(
-        frame, colour or "Scanning...", (20, 35),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-        (0, 255, 0) if colour else (0, 0, 255), 2
-    )
-
-    for i, (name, score) in enumerate(
-        sorted(scores.items(), key=lambda item: -item[1])
-    ):
-        cv2.putText(
-            frame, f"{name}: {score:.0%}", (20, 70 + i * 25),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1
-        )
-
-    cv2.imshow("Sorting Camera", frame)
-    return colour, (cv2.waitKey(1) & 0xFF) != ord("q")
+    for colour_name, (low, high) in COLOUR_RANGES.items():
+        color_mask = cv2.inRange(hsv_frame, np.array(low), np.array(high))
+        if colour_name == "Red":
+            color_mask |= cv2.inRange(hsv_frame, np.array(RED_UPPER_RANGE[0]), np.array(RED_UPPER_RANGE[1]))
+        
+        overlap_count = cv2.countNonZero(cv2.bitwise_and(color_mask, detect_mask))
+        if (overlap_count / mask_pixels) >= 0.30:
+            return colour_name
+            
+    return None
 
 
-def send_command(cnc, command, cam):
-    print("Sending:", command.strip())
-    cnc.write(command.encode())
-    cnc.flush()
+def run_sorter(cnc: serial.Serial, camera: cv2.VideoCapture):
+    if not camera.isOpened():
+        raise RuntimeError("Camera unavailable.")
 
-    deadline = time.monotonic() + 60
-    response_buffer = b""
+    frame_ok, sample_frame = camera.read()
+    if not frame_ok:
+        raise RuntimeError("Frame capture failed.")
+    
+    frame_h, frame_w = sample_frame.shape[:2]
+    detect_mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
+    cv2.circle(detect_mask, (frame_w // 2, frame_h // 2), BALL_RADIUS, 255, -1)
 
-    while time.monotonic() < deadline:
-        # Keep the camera updating while waiting for the CNC.
-        success, frame = cam.read()
-        if success:
-            cv2.imshow("Sorting Camera", frame)
+    sorted_count, last_colour = 0, None
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            raise KeyboardInterrupt
+    while sorted_count < TARGET_BALLS:
+        frame_ok, current_frame = camera.read()
+        if not frame_ok:
+            break
 
-        # Read serial data without blocking.
-        waiting = cnc.in_waiting
-        if waiting:
-            response_buffer += cnc.read(waiting)
+        detected_colour = detect_colour(current_frame, detect_mask)
 
-            while b"\n" in response_buffer:
-                line, response_buffer = response_buffer.split(b"\n", 1)
-                response = line.decode(
-                    errors="replace"
-                ).strip()
+        if detected_colour is None:
+            send_gcode(cnc, "G91 Y-0.5 F60")
+            last_colour = None
+            continue
 
-                if not response:
-                    continue
+        if detected_colour == last_colour:
+            time.sleep(0.05)
+            continue
 
-                print("CNC:", response)
-
-                if response.lower().startswith("error"):
-                    raise RuntimeError(response)
-
-                if response.lower() == "ok":
-                    return
-
-        time.sleep(0.005)
-
-    raise TimeoutError(f"No CNC acknowledgement for: {command.strip()}")
-
-
-def confirm_colour(cam):
-    readings = []
-
-    for _ in range(STABLE_FRAMES):
-        colour, running = show_camera(cam)
-        if not running:
-            raise KeyboardInterrupt
-
-        readings.append(colour)
-        time.sleep(0.1)
-
-    confirmed = readings[0]
-    return confirmed if confirmed and all(
-        colour == confirmed for colour in readings
-    ) else None
-
-
-def sort_ball(cnc, cam, colour):
-    left = colour in LEFT_COLOURS
-    offset = CUP_OFFSET_LEFT if left else CUP_OFFSET_RIGHT
-
-    commands = [
-        f"G91 X{CAM_OFFSET_X}\n",
-        f"G91 Z{-Z_LOWER_DIST}\n",
-        f"G91 X{offset}\n",
-        f"G91 Z{Z_LOWER_DIST}\n",
-        f"G91 X{-offset}\n",
-        f"G91 X{-CAM_OFFSET_X}\n",
-    ]
-
-    for command in commands:
-        send_command(cnc, command, cam)
-
-
-def main():
-    cnc = connect_cnc()
-    cam = cv2.VideoCapture(1)
-
-    # Request a smaller camera buffer to reduce stale frames.
-    cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-    if not cam.isOpened():
-        cnc.close()
-        raise RuntimeError("Camera unavailable")
-
-    try:
-        sorted_count = 0
-        previous_colour = None
-
-        while sorted_count < TARGET_BALL_COUNT:
-            colour, running = show_camera(cam)
-            if not running:
-                break
-
-            if colour is None:
-                previous_colour = None
-                send_command(cnc, "G91 Y-0.5 F60\n", cam)
-                time.sleep(SCAN_DELAY)
-                continue
-
-            # Avoid sorting repeatedly while viewing the same ball.
-            if colour == previous_colour:
-                time.sleep(0.05)
-                continue
-
-            confirmed = confirm_colour(cam)
-            if confirmed is None:
-                previous_colour = None
-                continue
-
-            sort_ball(cnc, cam, confirmed)
-            sorted_count += 1
-            previous_colour = confirmed
-
-            print(
-                f"Sorted {sorted_count}/{TARGET_BALL_COUNT}: "
-                f"{confirmed}"
-            )
-
-    except KeyboardInterrupt:
-        print("Sorting stopped.")
-
-    finally:
-        cam.release()
-        cv2.destroyAllWindows()
-        cnc.close()
+        target_offset = BIN_LEFT if detected_colour in IS_RIPE else BIN_RIGHT
+        send_gcode(cnc, get_sort_gcode(target_offset))
+        
+        sorted_count += 1
+        last_colour = detected_colour
+        print(f"Sorted ({sorted_count}/{TARGET_BALLS}): {detected_colour}")
 
 
 if __name__ == "__main__":
-    main()
+    
+    try:
+        cnc, camera = connect_cnc, cv2.VideoCapture(1)
+        run_sorter(cnc, camera)
+        
+    except Exception as err:
+        print(f"\n[Exited]: {err}")
+
+    finally:
+        if camera and camera.isOpened():
+            camera.release()
+        if cnc and cnc.is_open:
+            cnc.close()
