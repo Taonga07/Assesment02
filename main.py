@@ -14,8 +14,6 @@ COLOUR_RANGES = {
     "Orange": ([7, 80, 60], [19, 255, 255]),
     "Red":    ([0, 70, 50],  [6, 255, 255],),
 }
-RED_UPPER_RANGE = ([170, 70, 50], [180, 255, 255])
-
 
 def get_sort_gcode(bin_offset: float) -> str:
     """Generates relative move sequence to drop ball in target bin."""
@@ -30,13 +28,13 @@ def get_sort_gcode(bin_offset: float) -> str:
 
 def find_cnc() -> str | None:
     try: return next(filter(lambda p: DEVICE_ID in p.description, list_ports())).device
-    except StopIteration: raise RuntimeError(f"Device '{DEVICE_ID}' not found.")
+    except StopIteration: return None
 
 
 def send_gcode(cnc: serial.Serial, cmd: str) -> None:
-    print("\033[1A Sending:", cmd); cnc.write(f"{cmd}\n".encode()); cnc.flush()
+    print("Sending:", cmd); cnc.write(f"{cmd}\n".encode()); cnc.flush()
     try: 
-        while (response:=cnc.readline().decode().strip()) != "ok":  print(f"\033[1A response:{response}")
+        while (response:=cnc.readline().decode().strip()) != "ok":  print(f"Response:{response}")
     except (serial.SerialException, OSError) as e: print(f"Device disconnected: {e}")
 
 
@@ -46,54 +44,28 @@ def detect_colour(frame: np.ndarray, detect_mask: np.ndarray) -> str | None:
 
     for colour_name, (low, high) in COLOUR_RANGES.items():
         color_mask = cv2.inRange(hsv_frame, np.array(low), np.array(high))
-        if colour_name == "Red":
-            color_mask |= cv2.inRange(hsv_frame, np.array(RED_UPPER_RANGE[0]), np.array(RED_UPPER_RANGE[1]))
-        
+
         overlap_count = cv2.countNonZero(cv2.bitwise_and(color_mask, detect_mask))
         if (overlap_count / mask_pixels) >= 0.30:
             return colour_name
             
     return None
 
+def run_sorter(cnc: serial.Serial, cam: cv2.VideoCapture):
+    if not cam.isOpened(): raise RuntimeError("Camera unavailable.")
+    if not cnc.is_open(): raise RuntimeError("CNC Machine unavailable.")
 
-def run_sorter(cnc: serial.Serial, camera: cv2.VideoCapture):
-    if not camera.isOpened():
-        raise RuntimeError("Camera unavailable.")
+    w, h = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    detect_mask = cv2.circle(np.zeros((h, w), dtype=np.uint8), (w // 2, h // 2), BALL_RADIUS, 255, -1)
 
-    frame_ok, sample_frame = camera.read()
-    if not frame_ok:
-        raise RuntimeError("Frame capture failed.")
-    
-    frame_h, frame_w = sample_frame.shape[:2]
-    detect_mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
-    cv2.circle(detect_mask, (frame_w // 2, frame_h // 2), BALL_RADIUS, 255, -1)
-
-    sorted_count, last_colour = 0, None
-
-    while sorted_count < TARGET_BALLS:
-        frame_ok, current_frame = camera.read()
+    while sorted_count:=0 < TARGET_BALLS:
+        frame_ok, current_frame = cam.read()
         if not frame_ok: raise RuntimeError("Camera Disoconected")
-
-        find_cnc() # throws error if none availible
-
+        if not find_cnc(): raise RuntimeError("CNC Machine Disconected")
         detected_colour = detect_colour(current_frame, detect_mask)
-
-        if detected_colour is None:
-            send_gcode(cnc, "G91 Y-0.5 F60")
-            last_colour = None
-            continue
-
-        if detected_colour == last_colour:
-            time.sleep(0.05)
-            continue
-
+        if detected_colour is None: send_gcode(cnc, "G91 Y-0.5 F60")
         target_offset = BIN_LEFT if detected_colour in IS_RIPE else BIN_RIGHT
-        for cmd in get_sort_gcode(target_offset):
-            send_gcode(cnc, cmd)
-            
-        
-        sorted_count += 1
-        last_colour = detected_colour
+        map(lambda cmd: send_gcode(cnc, cmd),  get_sort_gcode(target_offset))
         print(f"Sorted ({sorted_count}/{TARGET_BALLS}): {detected_colour}")
 
 
