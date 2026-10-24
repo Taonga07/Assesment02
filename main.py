@@ -12,13 +12,13 @@ CUP_OFFSET_LEFT, CUP_OFFSET_RIGHT = -100, 100
 LEFT_COLOURS = ("Red", "Green", "Orange")  # everything else goes right
 
 MOVES = {
-    "SCAN": "G91 G1 Y-1\n",
-    "CAM_TOOL": f"G91 G1 X{CAM_OFFSET_X}\n",
-    "TOOL_CAM": f"G91 G1 X{-CAM_OFFSET_X}\n",
-    "LOWER": f"G91 G1 Z{-Z_LOWER_DIST}\n",
-    "RAISE": f"G91 G1 Z{Z_LOWER_DIST}\n",
-    "LEFT": f"G91 G1 X{CUP_OFFSET_LEFT}\n",
-    "RIGHT": f"G91 G1 X{CUP_OFFSET_RIGHT}\n",
+    "SCAN": "G91 Y-1\n",
+    "CAM_TOOL": f"G91 X{CAM_OFFSET_X}\n",
+    "TOOL_CAM": f"G91 X{-CAM_OFFSET_X}\n",
+    "LOWER": f"G91 Z{-Z_LOWER_DIST}\n",
+    "RAISE": f"G91 Z{Z_LOWER_DIST}\n",
+    "LEFT": f"G91 X{CUP_OFFSET_LEFT}\n",
+    "RIGHT": f"G91 X{CUP_OFFSET_RIGHT}\n",
 }
 
 COLOURS = {
@@ -46,12 +46,32 @@ def detect_colour(frame):
     colour = max(matches, key=matches.get) if matches else None
     return (colour if colour and matches[colour] >= COLOR_THRESHOLD else None), (cx, cy)
 
+async def send_command(reader, writer, cmd):
+    print(cmd)
+    writer.write(cmd.encode())
+    await writer.drain()
+
+    while True:
+        response = await asyncio.wait_for(reader.readline(), timeout=15)
+        response = response.decode(errors="replace").strip()
+
+        if not response:
+            continue
+
+        print(response)
+
+        if response.lower().startswith("error"):
+            raise RuntimeError(f"CNC response: {response}")
+
+        if response.lower() == "ok":
+            break
+
 async def main():
     port = next((p.device for p in lp.comports() if DEVICE_ID in p.description), None)
     if not port: raise RuntimeError(f"No {DEVICE_ID} device found")
 
     reader, writer = await connect(url=port, baudrate=BAUD)
-    cam = cv2.VideoCapture(0)
+    cam = cv2.VideoCapture(1)
 
     try:
         if not cam.isOpened():
@@ -78,7 +98,7 @@ async def main():
 
             left = colour in LEFT_COLOURS
             cup = MOVES["LEFT"] if left else MOVES["RIGHT"]
-            reset = f"G91 G1 X{-CUP_OFFSET_LEFT if left else -CUP_OFFSET_RIGHT}\n"
+            reset = f"G91  X{-CUP_OFFSET_LEFT if left else -CUP_OFFSET_RIGHT}\n"
 
             commands = (
                 [MOVES["CAM_TOOL"], MOVES["LOWER"], cup,
@@ -87,17 +107,7 @@ async def main():
             )
 
             for cmd in commands:
-                writer.write(cmd.encode())
-                await writer.drain()
-
-                response = await asyncio.wait_for(reader.readline(), 15)
-                response = response.decode(errors="replace").strip()
-
-                if response.lower().startswith("error") or not response:
-                    raise RuntimeError(f"CNC response: {response or 'disconnected'}")
-
-                if response.lower() != "ok":
-                    raise RuntimeError(f"Unexpected CNC response: {response}")
+                await send_command(reader, writer, cmd)
 
             if colour:
                 sorted_count += 1
