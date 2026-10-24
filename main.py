@@ -19,7 +19,13 @@ RED_UPPER_RANGE = ([170, 70, 50], [180, 255, 255])
 
 def get_sort_gcode(bin_offset: float) -> str:
     """Generates relative move sequence to drop ball in target bin."""
-    return f"G91 X{-CAM_OFFSET}\nG91 Z{-LOWER_DEPTH}\nG91 X{bin_offset}\nG91 Z{LOWER_DEPTH}\nG91 X{-bin_offset + CAM_OFFSET}"
+    return (
+        f"G91 X{-CAM_OFFSET}",
+        f"G91 Z{-LOWER_DEPTH}",
+        f"G91 X{bin_offset}",
+        f"G91 Z{LOWER_DEPTH}"
+        f"G91 X{-bin_offset + CAM_OFFSET}"
+    )
 
 
 def connect_cnc() -> serial.Serial:
@@ -31,24 +37,9 @@ def connect_cnc() -> serial.Serial:
     return cnc
 
 
-def send_gcode(cnc: serial.Serial, gcode: str) -> None:
-    for cmd in filter(None, gcode.split("\n")):
-        print("Sending:", cmd)
-        cnc.write(f"{cmd}\n".encode())
-        cnc.flush()
-        
-        deadline, read_buf = time.monotonic() + 60, b""
-        while time.monotonic() < deadline:
-            if cnc.in_waiting:
-                read_buf += cnc.read(cnc.in_waiting)
-                if b"\n" in read_buf:
-                    line, read_buf = read_buf.split(b"\n", 1)
-                    response = line.decode(errors="replace").strip().lower()
-                    if response == "ok":
-                        break
-                    if response.startswith("error"):
-                        raise RuntimeError(f"CNC Error: {response}")
-            time.sleep(0.002)
+def send_gcode(cnc: serial.Serial, cmd: str) -> None:
+    print("Sending:", cmd); cnc.write(f"{cmd}\n".encode()); cnc.flush()
+    while response:=cnc.readline().decode().strip() != "ok": print(response)
 
 
 def detect_colour(frame: np.ndarray, detect_mask: np.ndarray) -> str | None:
@@ -98,7 +89,7 @@ def run_sorter(cnc: serial.Serial, camera: cv2.VideoCapture):
             continue
 
         target_offset = BIN_LEFT if detected_colour in IS_RIPE else BIN_RIGHT
-        send_gcode(cnc, get_sort_gcode(target_offset))
+        map(lambda cmd: send_gcode(cnc, cmd), get_sort_gcode(target_offset))
         
         sorted_count += 1
         last_colour = detected_colour
@@ -110,7 +101,7 @@ if __name__ == "__main__":
     try:
         cnc, camera = connect_cnc, cv2.VideoCapture(1)
         run_sorter(cnc, camera)
-        
+
     except Exception as err:
         print(f"\n[Exited]: {err}")
 
