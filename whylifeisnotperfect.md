@@ -1,0 +1,6 @@
+- [ ] doesnt detyect all colours corectly
+- [ ] rleative movement means it will sometime s need to be recentred
+- [ ] no way to set start position ( start pos z should be certain dimeter circle)
+- [ ] inform if its not 100% acciurate
+- [ ] fix preiunt sytaments to be cleaner
+- fix how errors are thrown
