@@ -1,0 +1,2 @@
+pyserial-asyncio
+opencv-python
