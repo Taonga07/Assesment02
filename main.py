@@ -8,11 +8,11 @@ BIN_LEFT, BIN_RIGHT = -20, 20
 IS_RIPE = {"Red", "Green", "Orange"}
 
 COLOUR_RANGES = {
-    "Green":  ([36, 60, 50], [85, 255, 255]),
-    "Blue":   ([95, 60, 50], [130, 255, 255]),
-    "Yellow": ([20, 70, 70], [35, 255, 255]),
-    "Orange": ([7, 80, 60], [19, 255, 255]),
-    "Red":    ([0, 70, 50],  [6, 255, 255],),
+    "Green": [[0, 100, 100], [10, 255, 255]],
+    "Blue":  [[170, 100, 20], [180, 255, 255]],
+    "Yellow": [[20, 100, 0], [35, 255, 255]],
+    "Orange": [[100, 100, 50], [130, 255, 255]],
+    "Red": [[40, 60, 60], [85, 255, 255]]
 }
 
 MOVES = {
@@ -62,19 +62,20 @@ def detect_colour(frame: np.ndarray, detect_mask: np.ndarray) -> str | None:
 
 def run_sorter(cnc: serial.Serial, cam: cv2.VideoCapture):
     if not cam.isOpened(): raise RuntimeError("Camera unavailable.")
-    if not cnc.is_open(): raise RuntimeError("CNC Machine unavailable.")
+    if not cnc.is_open: raise RuntimeError("CNC Machine unavailable.")
 
     w, h = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
     detect_mask = cv2.circle(np.zeros((h, w), dtype=np.uint8), (w // 2, h // 2), BALL_RADIUS, 255, -1)
 
-    while pressed_key:= cv2.waitKey(1) != ord("q"):
+    while (pressed_key:= cv2.waitKey(1) & 0xFF) != ord("q"):
         frame_ok, frame = cam.read()
         if not frame_ok: raise RuntimeError("Camera Disoconected")
         
         if pressed_key in MOVES: send_gcode(cnc, MOVES[pressed_key])
 
-        cv2.imshow(frame)
+        cv2.imshow("window", frame)
 
+    cv2.destroyAllWindows()
     print("Running automated sort script")
 
     while sorted_count:=0 < TARGET_BALLS:
@@ -83,20 +84,23 @@ def run_sorter(cnc: serial.Serial, cam: cv2.VideoCapture):
 
         if detected_colour:= detect_colour(current_frame, detect_mask) is None:
             send_gcode(cnc, "G91 Y-0.5 F60")
+            time.sleep(0.1)
             continue
 
         target_offset = BIN_LEFT if detected_colour in IS_RIPE else BIN_RIGHT
         [send_gcode(cnc, cmd) for cmd in get_sort_gcode(target_offset)]
+        time.sleep(0.1)
 
         print(f"Sorted ({sorted_count}/{TARGET_BALLS}): {detected_colour}")
 
 if __name__ == "__main__":
     cnc, camera = None, None
     try:
-        camera = cv2.VideoCapture(1)
+        camera = cv2.VideoCapture(0)
         cnc = serial.Serial(find_cnc(), BAUDRATE, timeout=5)
         time.sleep(2); cnc.reset_input_buffer()
         run_sorter(cnc, camera)
+    
     except Exception as err:
         print(f"\n[exited] {err}")
     finally:
