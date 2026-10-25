@@ -5,47 +5,58 @@ import time, cv2, numpy as np, serial
 BAUDRATE, DEVICE_ID, TARGET_BALLS = 115200, "CH340", 5
 BALL_RADIUS, CAM_OFFSET, LOWER_DEPTH = 120, 50, 30
 BIN_LEFT, BIN_RIGHT = -20, 20
-IS_RIPE = {"Red", "Green", "Orange"}
+IS_RIPE = {"LRed", "Green", "HRed"}
+SYNC_CMD, FEED, SEARCH_FEED, FLUSH_FRAMES = "G4 P0", 600, 60, 4  # GRBL: "G4 P0"
 
 COLOUR_RANGES = {
-    "Green": [[0, 100, 100], [10, 255, 255]],
-    "Blue":  [[170, 100, 20], [180, 255, 255]],
-    "Yellow": [[20, 100, 0], [35, 255, 255]],
-    "Orange": [[100, 100, 50], [130, 255, 255]],
-    "Red": [[40, 60, 60], [85, 255, 255]]
+    "Green":  [[40, 60, 60],    [85, 255, 255]],
+    "Blue":   [[100, 100, 50],  [130, 255, 255]],
+    "Yellow": [[20, 100, 0],    [35, 255, 255]],
+    "LRed":   [[0, 100, 100],   [10, 255, 255]],
+    "HRed":   [[170, 100, 20],  [180, 255, 255]],
 }
 
 MOVES = {
-    ord("a"): "G91 X-5\n",
-    ord("d"): "G91 X5\n",
-    ord("w"): "G91 Y5\n",
-    ord("s"): "G91 Y-5\n",
-    ord("r"): "G91 Z5\n",
-    ord("f"): "G91 Z-5\n",
+    ord("a"): "G1 X-5", ord("d"): "G1 X5",
+    ord("w"): "G1 Y5",  ord("s"): "G1 Y-5",
+    ord("r"): "G1 Z5",  ord("f"): "G1 Z-5",
 }
 
-def get_sort_gcode(bin_offset: float) -> str:
+def get_sort_gcode(bin_offset: float) -> list[str]:
     return [
-        f"G91 X{-CAM_OFFSET}",
-        f"G91 Z{-LOWER_DEPTH}",
-        f"G91 X{bin_offset}",
-        f"G91 Z{LOWER_DEPTH}",
-        f"G91 X{-bin_offset + CAM_OFFSET}"
+        f"G1 X{-CAM_OFFSET}",
+        f"G1 Z{-LOWER_DEPTH}",
+        f"G1 X{bin_offset}",
+        f"G1 Z{LOWER_DEPTH}",
+        f"G1 X{-bin_offset + CAM_OFFSET}",
     ]
 
 def find_cnc() -> str:
     try: return next(p.device for p in list_ports() if DEVICE_ID in p.description)
     except StopIteration: raise RuntimeError(f"Device '{DEVICE_ID}' not found.")
 
-def send_gcode(cnc: serial.Serial, cmd: str) -> None:
+def _txrx(cnc: serial.Serial, cmd: str) -> None:
+    """Send one line, block until the controller replies 'ok'."""
     print(f"[tx] {cmd}")
+    cnc.write(f"{cmd}\n".encode()); cnc.flush()
+    while (resp := cnc.readline().decode(errors="ignore").strip()) != "ok":
+        if not resp: raise RuntimeError(f"No response to '{cmd}'")
+        print(f"[rx] {resp}")
+
+def send_gcode(cnc: serial.Serial, cmd: str, wait: bool = True) -> None:
+    """Send a command; if wait, also block until the machine has finished moving."""
     try:
-        cnc.write(f"{cmd}\n".encode()); cnc.flush()
-        while (resp := cnc.readline().decode(errors="ignore").strip()) != "ok":
-            if not resp: raise RuntimeError(f"No response to '{cmd}'")
-            print(f"[rx] {resp}")
+        _txrx(cnc, cmd if " F" in cmd or not cmd.startswith("G1") else f"{cmd} F{FEED}")
+        if wait: _txrx(cnc, SYNC_CMD)
     except (serial.SerialException, OSError) as e:
-        raise RuntimeError(f"CNC Machine Disconected: {e}")
+        raise RuntimeError(f"CNC Machine Disconnected: {e}")
+
+def read_fresh(cam: cv2.VideoCapture) -> np.ndarray:
+    """Discard buffered frames so detection uses an image taken after the move."""
+    for _ in range(FLUSH_FRAMES): cam.grab()
+    ok, frame = cam.read()
+    if not ok: raise RuntimeError("Camera Disconnected")
+    return frame
 
 def detect_colour(frame: np.ndarray, detect_mask: np.ndarray) -> str | None:
     hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -53,54 +64,51 @@ def detect_colour(frame: np.ndarray, detect_mask: np.ndarray) -> str | None:
 
     for colour_name, (low, high) in COLOUR_RANGES.items():
         color_mask = cv2.inRange(hsv_frame, np.array(low), np.array(high))
-
         overlap_count = cv2.countNonZero(cv2.bitwise_and(color_mask, detect_mask))
         if (overlap_count / mask_pixels) >= 0.30:
             return colour_name
-            
     return None
 
-def run_sorter(cnc: serial.Serial, cam: cv2.VideoCapture):
+def run_sorter(cnc: serial.Serial, cam: cv2.VideoCapture) -> None:
     if not cam.isOpened(): raise RuntimeError("Camera unavailable.")
     if not cnc.is_open: raise RuntimeError("CNC Machine unavailable.")
+
+    send_gcode(cnc, "G91", wait=False)  # relative mode, set once
 
     w, h = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
     detect_mask = cv2.circle(np.zeros((h, w), dtype=np.uint8), (w // 2, h // 2), BALL_RADIUS, 255, -1)
 
-    while (pressed_key:= cv2.waitKey(1) & 0xFF) != ord("q"):
+    while (pressed_key := cv2.waitKey(1) & 0xFF) != ord("q"):
         frame_ok, frame = cam.read()
-        if not frame_ok: raise RuntimeError("Camera Disoconected")
-        
+        if not frame_ok: raise RuntimeError("Camera Disconnected")
         if pressed_key in MOVES: send_gcode(cnc, MOVES[pressed_key])
-
         cv2.imshow("window", frame)
 
     cv2.destroyAllWindows()
     print("Running automated sort script")
 
-    while sorted_count:=0 < TARGET_BALLS:
-        frame_ok, current_frame = cam.read()
-        if not frame_ok: raise RuntimeError("Camera Disoconected")
+    sorted_count = 0
+    while sorted_count < TARGET_BALLS:
+        detected_colour = detect_colour(read_fresh(cam), detect_mask)
 
-        if detected_colour:= detect_colour(current_frame, detect_mask) is None:
-            send_gcode(cnc, "G91 Y-0.5 F60")
-            time.sleep(0.1)
+        if detected_colour is None:
+            send_gcode(cnc, f"G1 Y-0.5 F{SEARCH_FEED}")  # waits until step is done
             continue
 
         target_offset = BIN_LEFT if detected_colour in IS_RIPE else BIN_RIGHT
-        [send_gcode(cnc, cmd) for cmd in get_sort_gcode(target_offset)]
-        time.sleep(0.1)
+        for cmd in get_sort_gcode(target_offset): send_gcode(cnc, cmd)
 
+        sorted_count += 1
         print(f"Sorted ({sorted_count}/{TARGET_BALLS}): {detected_colour}")
 
 if __name__ == "__main__":
     cnc, camera = None, None
     try:
         camera = cv2.VideoCapture(0)
-        cnc = serial.Serial(find_cnc(), BAUDRATE, timeout=5)
+        cnc = serial.Serial(find_cnc(), BAUDRATE, timeout=30)
         time.sleep(2); cnc.reset_input_buffer()
         run_sorter(cnc, camera)
-    
+
     except Exception as err:
         print(f"\n[exited] {err}")
     finally:
