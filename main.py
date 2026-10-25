@@ -15,8 +15,16 @@ COLOUR_RANGES = {
     "Red":    ([0, 70, 50],  [6, 255, 255],),
 }
 
+MOVES = {
+    ord("a"): "G91 X-5\n",
+    ord("d"): "G91 X5\n",
+    ord("w"): "G91 Y5\n",
+    ord("s"): "G91 Y-5\n",
+    ord("r"): "G91 Z5\n",
+    ord("f"): "G91 Z-5\n",
+}
+
 def get_sort_gcode(bin_offset: float) -> str:
-    """Generates relative move sequence to drop ball in target bin."""
     return [
         f"G91 X{-CAM_OFFSET}",
         f"G91 Z{-LOWER_DEPTH}",
@@ -59,12 +67,23 @@ def run_sorter(cnc: serial.Serial, cam: cv2.VideoCapture):
     w, h = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
     detect_mask = cv2.circle(np.zeros((h, w), dtype=np.uint8), (w // 2, h // 2), BALL_RADIUS, 255, -1)
 
+    while pressed_key:= cv2.waitKey(1) != ord("q"):
+        frame_ok, frame = cam.read()
+        if not frame_ok: raise RuntimeError("Camera Disoconected")
+        
+        if pressed_key in MOVES: send_gcode(cnc, MOVES[pressed_key])
+
+        cv2.imshow(frame)
+
+    print("Running automated sort script")
+
     while sorted_count:=0 < TARGET_BALLS:
         frame_ok, current_frame = cam.read()
         if not frame_ok: raise RuntimeError("Camera Disoconected")
 
-        detected_colour = detect_colour(current_frame, detect_mask)
-        if detected_colour is None: send_gcode(cnc, "G91 Y-0.5 F60")
+        if detected_colour:= detect_colour(current_frame, detect_mask) is None:
+            send_gcode(cnc, "G91 Y-0.5 F60")
+            continue
 
         target_offset = BIN_LEFT if detected_colour in IS_RIPE else BIN_RIGHT
         [send_gcode(cnc, cmd) for cmd in get_sort_gcode(target_offset)]
