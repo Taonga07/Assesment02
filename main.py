@@ -25,18 +25,19 @@ def get_sort_gcode(bin_offset: float) -> str:
         f"G91 X{-bin_offset + CAM_OFFSET}"
     ]
 
-
-def find_cnc() -> str | None:
-    try: return next(filter(lambda p: DEVICE_ID in p.description, list_ports())).device
-    except StopIteration: return None
-
+def find_cnc() -> str:
+    try: return next(p.device for p in list_ports() if DEVICE_ID in p.description)
+    except StopIteration: raise RuntimeError(f"Device '{DEVICE_ID}' not found.")
 
 def send_gcode(cnc: serial.Serial, cmd: str) -> None:
-    print("Sending:", cmd); cnc.write(f"{cmd}\n".encode()); cnc.flush()
-    try: 
-        while (response:=cnc.readline().decode().strip()) != "ok":  print(f"Response:{response}")
-    except (serial.SerialException, OSError) as e: print(f"Device disconnected: {e}")
-
+    print(f"[tx] {cmd}")
+    try:
+        cnc.write(f"{cmd}\n".encode()); cnc.flush()
+        while (resp := cnc.readline().decode(errors="ignore").strip()) != "ok":
+            if not resp: raise RuntimeError(f"No response to '{cmd}'")
+            print(f"[rx] {resp}")
+    except (serial.SerialException, OSError) as e:
+        raise RuntimeError(f"CNC Machine Disconected: {e}")
 
 def detect_colour(frame: np.ndarray, detect_mask: np.ndarray) -> str | None:
     hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -61,27 +62,24 @@ def run_sorter(cnc: serial.Serial, cam: cv2.VideoCapture):
     while sorted_count:=0 < TARGET_BALLS:
         frame_ok, current_frame = cam.read()
         if not frame_ok: raise RuntimeError("Camera Disoconected")
-        if not find_cnc(): raise RuntimeError("CNC Machine Disconected")
+
         detected_colour = detect_colour(current_frame, detect_mask)
         if detected_colour is None: send_gcode(cnc, "G91 Y-0.5 F60")
-        target_offset = BIN_LEFT if detected_colour in IS_RIPE else BIN_RIGHT
-        map(lambda cmd: send_gcode(cnc, cmd),  get_sort_gcode(target_offset))
-        print(f"Sorted ({sorted_count}/{TARGET_BALLS}): {detected_colour}")
 
+        target_offset = BIN_LEFT if detected_colour in IS_RIPE else BIN_RIGHT
+        [send_gcode(cnc, cmd) for cmd in get_sort_gcode(target_offset)]
+
+        print(f"Sorted ({sorted_count}/{TARGET_BALLS}): {detected_colour}")
 
 if __name__ == "__main__":
     cnc, camera = None, None
     try:
-        cnc = serial.Serial(find_cnc(), BAUDRATE, timeout=0)
-        time.sleep(2); cnc.reset_input_buffer()
         camera = cv2.VideoCapture(1)
+        cnc = serial.Serial(find_cnc(), BAUDRATE, timeout=5)
+        time.sleep(2); cnc.reset_input_buffer()
         run_sorter(cnc, camera)
-
     except Exception as err:
-        print(f"\n[Exited]: {err}")
-
+        print(f"\n[exited] {err}")
     finally:
-        if camera and camera.isOpened():
-            camera.release()
-        if cnc and cnc.is_open:
-            cnc.close()
+        if camera and camera.isOpened(): camera.release()
+        if cnc and cnc.is_open: cnc.close()
