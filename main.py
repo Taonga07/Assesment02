@@ -6,7 +6,7 @@ BAUDRATE, DEVICE_ID, TARGET_BALLS = 115200, "CH340", 4
 BALL_RADIUS, CAM_OFFSET, LOWER_DEPTH = 120, 50, 30
 BIN_LEFT, BIN_RIGHT = -20, 20
 IS_RIPE = {"LRed", "Green", "HRed"}
-SYNC_CMD, FEED, SEARCH_FEED, FLUSH_FRAMES, SEARCH_STEP = "G4 P0", 600, 60, 4, 0.5
+FLUSH_FRAMES = 4
 
 COLOUR_RANGES = {
     "Green":  [[78, 45, 35], [96, 255, 255]],
@@ -17,18 +17,18 @@ COLOUR_RANGES = {
 }
 
 MOVES = {
-    ord("a"): "G1 X-5", ord("d"): "G1 X5",
-    ord("w"): "G1 Y5",  ord("s"): "G1 Y-5",
-    ord("r"): "G1 Z5",  ord("f"): "G1 Z-5",
+    ord("a"): "G91 X-5", ord("d"): "G91 X5",
+    ord("w"): "G91 Y5",  ord("s"): "G91 Y-5",
+    ord("r"): "G91 Z5",  ord("f"): "G91 Z-5",
 }
 
 def get_sort_gcode(bin_offset: float) -> list[str]:
     return [
-        f"G1 X{-CAM_OFFSET}",
-        f"G1 Z{-LOWER_DEPTH}",
-        f"G1 X{bin_offset}",
-        f"G1 Z{LOWER_DEPTH}",
-        f"G1 X{-bin_offset + CAM_OFFSET}",
+        f"G91 X{-CAM_OFFSET}",
+        f"G91 Z{-LOWER_DEPTH}",
+        f"G91 X{bin_offset}",
+        f"G91 Z{LOWER_DEPTH}",
+        f"G91 X{-bin_offset + CAM_OFFSET}",
     ]
 
 def find_cnc() -> str:
@@ -46,9 +46,8 @@ def _txrx(cnc: serial.Serial, cmd: str) -> None:
 def send_gcode(cnc: serial.Serial, cmd: str, wait: bool = True) -> None:
     """Send a command; if wait, also block until the machine has finished moving."""
     try:
-        if cmd.startswith("G1") and " F" not in cmd: cmd = f"{cmd} F{FEED}"
         _txrx(cnc, cmd)
-        if wait: _txrx(cnc, SYNC_CMD)
+        if wait: _txrx(cnc, "G4 P0") # wait cmd
     except (serial.SerialException, OSError) as e:
         raise RuntimeError(f"CNC Machine Disconnected: {e}")
 
@@ -71,7 +70,7 @@ def detect_colour(frame: np.ndarray, detect_mask: np.ndarray) -> str | None:
         color_mask = cv2.inRange(hsv_frame, np.array(low), np.array(high))
         overlap_count = cv2.countNonZero(cv2.bitwise_and(color_mask, detect_mask))
         print(overlap_count / mask_pixels, colour_name)
-        if (overlap_count / mask_pixels) >= 0.30:
+        if (overlap_count / mask_pixels) >= 0.2:
             return colour_name
     return None
 
@@ -99,7 +98,7 @@ def run_sorter(cnc: serial.Serial, cam: cv2.VideoCapture) -> None:
         detected_colour = detect_colour(read_fresh(cam), detect_mask)
 
         if detected_colour is None:
-            send_gcode(cnc, f"G1 Y-{SEARCH_STEP} F{SEARCH_FEED}")  # waits so the next frame is fresh
+            send_gcode(cnc, f"G91 Y{-0.5}")  # waits so the next frame is fresh
             continue
 
         send_sequence(cnc, get_sort_gcode(BIN_LEFT if detected_colour in IS_RIPE else BIN_RIGHT))
@@ -117,3 +116,5 @@ if __name__ == "__main__":
     finally:
         if camera and camera.isOpened(): camera.release()
         if cnc and cnc.is_open: cnc.close()
+
+# stop if moved certain distance
