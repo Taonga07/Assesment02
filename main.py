@@ -70,7 +70,7 @@ def detect_colour(frame: np.ndarray, detect_mask: np.ndarray) -> str | None:
         color_mask = cv2.inRange(hsv_frame, np.array(low), np.array(high))
         overlap_count = cv2.countNonZero(cv2.bitwise_and(color_mask, detect_mask))
         print(overlap_count / mask_pixels, colour_name)
-        if (overlap_count / mask_pixels) >= 0.2:
+        if (overlap_count / mask_pixels) >= (0.2 if colour_name == "Yellow" else 0.3):
             return colour_name
     return None
 
