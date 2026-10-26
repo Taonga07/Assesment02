@@ -6,15 +6,14 @@ BAUDRATE, DEVICE_ID, TARGET_BALLS = 115200, "CH340", 4
 BALL_RADIUS, CAM_OFFSET, LOWER_DEPTH = 120, 50, 30
 BIN_LEFT, BIN_RIGHT = -20, 20
 IS_RIPE = {"LRed", "Green", "HRed"}
-SYNC_CMD, FEED, FLUSH_FRAMES = "G4 P0", 1500, 2
-SEARCH_STEP, SEARCH_FEED = 2, 300
+SYNC_CMD, FEED, SEARCH_FEED, FLUSH_FRAMES, SEARCH_STEP = "G4 P0", 600, 60, 4, 0.5
 
 COLOUR_RANGES = {
-    "Green":  [[40, 60, 60],    [85, 255, 255]],
-    "Blue":   [[100, 100, 50],  [130, 255, 255]],
-    "Yellow": [[20, 100, 0],    [35, 255, 255]],
-    "LRed":   [[0, 100, 100],   [10, 255, 255]],
-    "HRed":   [[170, 100, 20],  [180, 255, 255]],
+    "Green":  [[78, 45, 35], [96, 255, 255]],
+    "Blue":   [[96, 100, 20], [130, 255, 255]],
+    "Yellow": [[18, 40, 145], [38, 255, 255]],
+    "LRed":   [[0, 70, 80], [10, 255, 200]],
+    "HRed":   [[170, 70, 80], [179, 255, 200]],
 }
 
 MOVES = {
@@ -71,6 +70,7 @@ def detect_colour(frame: np.ndarray, detect_mask: np.ndarray) -> str | None:
     for colour_name, (low, high) in COLOUR_RANGES.items():
         color_mask = cv2.inRange(hsv_frame, np.array(low), np.array(high))
         overlap_count = cv2.countNonZero(cv2.bitwise_and(color_mask, detect_mask))
+        print(overlap_count / mask_pixels, colour_name)
         if (overlap_count / mask_pixels) >= 0.30:
             return colour_name
     return None
@@ -110,13 +110,10 @@ def run_sorter(cnc: serial.Serial, cam: cv2.VideoCapture) -> None:
 if __name__ == "__main__":
     cnc, camera = None, None
     try:
-        camera = cv2.VideoCapture(0)
+        camera = cv2.VideoCapture(1)
         cnc = serial.Serial(find_cnc(), BAUDRATE, timeout=30)
         time.sleep(2); cnc.reset_input_buffer()
         run_sorter(cnc, camera)
-
-    except Exception as err:
-        print(f"\n[exited] {err}")
     finally:
         if camera and camera.isOpened(): camera.release()
         if cnc and cnc.is_open: cnc.close()
