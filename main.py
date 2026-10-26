@@ -1,7 +1,6 @@
 from serial.tools.list_ports import comports as list_ports
 import time, cv2, numpy as np, serial
 
-# Machine Parameters
 BAUDRATE, DEVICE_ID, TARGET_BALLS = 115200, "CH340", 4
 BALL_RADIUS, CAM_OFFSET, LOWER_DEPTH = 120, 50, 30
 BIN_LEFT, BIN_RIGHT = -20, 20
@@ -45,7 +44,7 @@ def _txrx(cnc: serial.Serial, cmd: str) -> None:
 def send_gcode(cnc: serial.Serial, cmd: str, wait: bool = True) -> None:
     try:
         _txrx(cnc, cmd)
-        if wait: _txrx(cnc, "G4 P0") # wait cmd
+        if wait: _txrx(cnc, "G4 P0")
     except (serial.SerialException, OSError) as e:
         raise RuntimeError(f"CNC Machine Disconnected: {e}")
 
@@ -69,41 +68,38 @@ def detect_colour(frame: np.ndarray, detect_mask: np.ndarray) -> str | None:
             return colour_name
     return None
 
-def run_sorter(cnc: serial.Serial, cam: cv2.VideoCapture) -> None:
-    if not cam.isOpened(): raise RuntimeError("Camera unavailable.")
-    if not cnc.is_open: raise RuntimeError("CNC Machine unavailable.")
+try: port = next(p.device for p in list_ports() if DEVICE_ID in p.description)
+except StopIteration: raise RuntimeError(f"Device '{DEVICE_ID}' not found.")
 
-    cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # minimise camera lag
+cnc, cam  = serial.Serial(port, BAUDRATE, timeout=30), cv2.VideoCapture(1)
+time.sleep(2); cnc.reset_input_buffer()
 
-    w, h = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    detect_mask = cv2.circle(np.zeros((h, w), dtype=np.uint8), (w // 2, h // 2), BALL_RADIUS, 255, -1)
+if not cam.isOpened(): raise RuntimeError("Camera unavailable.")
+if not cnc.is_open: raise RuntimeError("CNC Machine unavailable.")
 
-    while (pressed_key := cv2.waitKey(1) & 0xFF) != ord("q"):
-        frame_ok, frame = cam.read()
-        if not frame_ok: raise RuntimeError("Camera Disconnected")
-        if pressed_key in MOVES: send_gcode(cnc, MOVES[pressed_key])
-        cv2.imshow("window", frame)
+cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    cv2.destroyAllWindows()
-    print("Running automated sort script")
+w, h = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
+detect_mask = cv2.circle(np.zeros((h, w), dtype=np.uint8), (w // 2, h // 2), BALL_RADIUS, 255, -1)
 
-    sorted_count = 0
-    while sorted_count < TARGET_BALLS:
-        detected_colour = detect_colour(read_fresh(cam), detect_mask)
+while (pressed_key := cv2.waitKey(1) & 0xFF) != ord("q"):
+    frame_ok, frame = cam.read()
+    if not frame_ok: raise RuntimeError("Camera Disconnected")
+    if pressed_key in MOVES: send_gcode(cnc, MOVES[pressed_key])
+    cv2.imshow("window", frame)
 
-        if detected_colour is None:
-            send_gcode(cnc, f"G91 Y{-0.5}")  # waits so the next frame is fresh
-            continue
+cv2.destroyAllWindows()
+print("Running automated sort script")
 
-        send_sequence(cnc, get_sort_gcode(BIN_LEFT if detected_colour in IS_RIPE else BIN_RIGHT))
+sorted_count = 0
+while sorted_count < TARGET_BALLS:
+    detected_colour = detect_colour(read_fresh(cam), detect_mask)
 
-        sorted_count += 1
-        print(f"Sorted ({sorted_count}/{TARGET_BALLS}): {detected_colour}")
+    if detected_colour is None:
+        send_gcode(cnc, f"G91 Y{-0.5}")
+        continue
 
-if __name__ == "__main__":
-    cnc, camera = serial.Serial(find_cnc(), BAUDRATE, timeout=30), cv2.VideoCapture(1)
-    time.sleep(2); cnc.reset_input_buffer()
-    run_sorter(cnc, camera)
-    
-    if camera and camera.isOpened(): camera.release()
-    if cnc and cnc.is_open: cnc.close()
+    send_sequence(cnc, get_sort_gcode(BIN_LEFT if detected_colour in IS_RIPE else BIN_RIGHT))
+
+    sorted_count += 1
+    print(f"Sorted ({sorted_count}/{TARGET_BALLS}): {detected_colour}")
