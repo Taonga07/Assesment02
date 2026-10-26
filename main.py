@@ -36,7 +36,6 @@ def find_cnc() -> str:
     except StopIteration: raise RuntimeError(f"Device '{DEVICE_ID}' not found.")
 
 def _txrx(cnc: serial.Serial, cmd: str) -> None:
-    """Send one line, block until the controller replies 'ok'."""
     print(f"[tx] {cmd}")
     cnc.write(f"{cmd}\n".encode()); cnc.flush()
     while (resp := cnc.readline().decode(errors="ignore").strip()) != "ok":
@@ -44,7 +43,6 @@ def _txrx(cnc: serial.Serial, cmd: str) -> None:
         print(f"[rx] {resp}")
 
 def send_gcode(cnc: serial.Serial, cmd: str, wait: bool = True) -> None:
-    """Send a command; if wait, also block until the machine has finished moving."""
     try:
         _txrx(cnc, cmd)
         if wait: _txrx(cnc, "G4 P0") # wait cmd
@@ -52,11 +50,9 @@ def send_gcode(cnc: serial.Serial, cmd: str, wait: bool = True) -> None:
         raise RuntimeError(f"CNC Machine Disconnected: {e}")
 
 def send_sequence(cnc: serial.Serial, cmds: list[str]) -> None:
-    """Queue every move back to back, sync only after the last one."""
     for i, cmd in enumerate(cmds): send_gcode(cnc, cmd, wait=(i == len(cmds) - 1))
 
 def read_fresh(cam: cv2.VideoCapture) -> np.ndarray:
-    """Discard buffered frames so detection uses an image taken after the move."""
     for _ in range(FLUSH_FRAMES): cam.grab()
     ok, frame = cam.read()
     if not ok: raise RuntimeError("Camera Disconnected")
@@ -69,7 +65,6 @@ def detect_colour(frame: np.ndarray, detect_mask: np.ndarray) -> str | None:
     for colour_name, (low, high) in COLOUR_RANGES.items():
         color_mask = cv2.inRange(hsv_frame, np.array(low), np.array(high))
         overlap_count = cv2.countNonZero(cv2.bitwise_and(color_mask, detect_mask))
-        print(overlap_count / mask_pixels, colour_name)
         if (overlap_count / mask_pixels) >= (0.2 if colour_name == "Yellow" else 0.3):
             return colour_name
     return None
@@ -79,7 +74,6 @@ def run_sorter(cnc: serial.Serial, cam: cv2.VideoCapture) -> None:
     if not cnc.is_open: raise RuntimeError("CNC Machine unavailable.")
 
     cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # minimise camera lag
-    send_gcode(cnc, "G91", wait=False)   # relative mode, set once
 
     w, h = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
     detect_mask = cv2.circle(np.zeros((h, w), dtype=np.uint8), (w // 2, h // 2), BALL_RADIUS, 255, -1)
@@ -107,14 +101,9 @@ def run_sorter(cnc: serial.Serial, cam: cv2.VideoCapture) -> None:
         print(f"Sorted ({sorted_count}/{TARGET_BALLS}): {detected_colour}")
 
 if __name__ == "__main__":
-    cnc, camera = None, None
-    try:
-        camera = cv2.VideoCapture(1)
-        cnc = serial.Serial(find_cnc(), BAUDRATE, timeout=30)
-        time.sleep(2); cnc.reset_input_buffer()
-        run_sorter(cnc, camera)
-    finally:
-        if camera and camera.isOpened(): camera.release()
-        if cnc and cnc.is_open: cnc.close()
-
-# stop if moved certain distance
+    cnc, camera = serial.Serial(find_cnc(), BAUDRATE, timeout=30), cv2.VideoCapture(1)
+    time.sleep(2); cnc.reset_input_buffer()
+    run_sorter(cnc, camera)
+    
+    if camera and camera.isOpened(): camera.release()
+    if cnc and cnc.is_open: cnc.close()
