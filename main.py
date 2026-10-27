@@ -1,7 +1,6 @@
 from serial.tools.list_ports import comports as list_ports
 import time, cv2, numpy as np, serial
 
-
 BALL_RADIUS, CAM_OFFSET, LOWER_DEPTH, BIN_OFFSET  = 120, 50, 30, 20
 IS_RIPE = {"LRed", "Green", "HRed"}
 TARGET_BALLS = 4
