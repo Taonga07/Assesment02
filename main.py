@@ -12,7 +12,14 @@ COLOUR_RANGES = {
     "HRed":   [[170, 70, 80], [179, 255, 200]],
 }
 
-MOVES = {ord("a"):"G91 X-5", ord("d"):"G91 X5", ord("w"):"G91 Y5", ord("s"):"G91 Y-5", ord("r"):"G91 Z5", ord("f"):"G91 Z-5"}
+MOVES = {
+    ord("a"):"G91 X-5",
+    ord("d"):"G91 X5",
+    ord("w"):"G91 Y5",
+    ord("s"):"G91 Y-5", 
+    ord("r"):"G91 Z5",
+    ord("f"):"G91 Z-5"
+    }
 
 port = next((p.device for p in list_ports() if DEVICE_ID in p.description), None)
 if not port: raise RuntimeError("CNC Device not found")
